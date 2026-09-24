@@ -38,13 +38,12 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
-// roster: names; app: slots + current game (survives a refresh)
-let roster = store.get('bt.roster', []);
+// app: corner names + current game (survives a refresh)
 let app = store.get('bt.app', null) || { slots: { 1: null, 2: null, 3: null, 4: null }, game: null, gameNo: 0 };
 // ui: transient state, never saved
-const ui = { cursor: 0, mode: null, draft: '', view: 'live', help: false, flash: '' };
+const ui = { field: 1, mode: null, view: 'live', help: false, confirm: false, flash: '' };
 
-const save = () => { store.set('bt.roster', roster); store.set('bt.app', app); };
+const save = () => store.set('bt.app', app);
 
 // ---------- game model ----------
 const SLOTS = [1, 2, 3, 4];
@@ -68,9 +67,12 @@ function derive(g) {
     p: {}, log: [], hitsTaken: { left: 0, right: 0 }, stops: { left: [], right: [] },
   };
   SLOTS.forEach((s) => (st.p[s] = { thrown: 0, hit: 0, miss: 0, unk: 0 }));
+  // teammates can swap order mid-game, so work on a copy of the rotation
+  const order = g.order.slice();
+  st.order = order;
   const next = (from) => {
-    const i = g.order.indexOf(from);
-    for (let k = 1; k <= 4; k++) { const c = g.order[(i + k) % 4]; if (!st.finished[c]) return c; }
+    const i = order.indexOf(from);
+    for (let k = 1; k <= 4; k++) { const c = order[(i + k) % 4]; if (!st.finished[c]) return c; }
     return from;
   };
   let lastHit = null;
@@ -96,6 +98,10 @@ function derive(g) {
       if (!st.over && st.finished[mate(e.p)]) st.over = sd;
     } else if (e.t === 'set') {
       st.cur = e.p;
+    } else if (e.t === 'swap') {
+      const a = order.indexOf(e.p), b = order.indexOf(mate(e.p));
+      [order[a], order[b]] = [order[b], order[a]];
+      st.cur = mate(e.p);
     }
   }
   st.pending = st.over ? null : lastHit;
@@ -113,38 +119,34 @@ const clock = (ms) => { const s = Math.floor(ms / 1000); return String(Math.floo
 const cursor = '<span class="cur"></span>';
 const COL = 38;
 
+function setupCell(s) {
+  const n = app.slots[s] || '';
+  if (ui.mode !== 'first' && ui.field === s) return sp('a', `> ${s} ${n}`) + cursor + ' '.repeat(Math.max(0, COL - 5 - n.length));
+  return (n ? `  ${s} ${esc(n)}` : `  ${s} ${sp('d', '____')}`) + ' '.repeat(Math.max(0, COL - 4 - (n || '____').length));
+}
+
 function renderSetup() {
-  const out = [header('bangers terminal · new game'), line(''), line('players', 'd')];
-  if (!roster.length) out.push(line('  no players yet', 'd'));
-  roster.forEach((n, i) => {
-    const slot = SLOTS.find((s) => app.slots[s] === n);
-    const sel = i === ui.cursor && ui.mode !== 'first';
-    const left = (sel ? '> ' : '  ') + n.padEnd(10);
-    if (slot) out.push(line(sp(sel ? 'a' : '', left) + sp('', `${slot}   `) + sp('d', side(slot))));
-    else out.push(line(sp(sel ? 'a' : 'd', left)));
-  });
-  out.push(grow);
-  const filled = SLOTS.filter((s) => app.slots[s]).length;
-  let prompt, help;
-  if (ui.mode === 'name') {
-    prompt = `${sp('a', '›')} new name: ${esc(ui.draft)}${cursor}`;
-    help = 'enter add   esc cancel';
-  } else if (ui.mode === 'first') {
-    prompt = `${sp('a', '›')} who throws first?  ${sp('d', '1-4')}  ${cursor}`;
-    help = '1-4 start the game   esc back';
+  const out = [
+    header('bangers terminal · new game'),
+    line(''),
+    line(sp('d', '  left'.padEnd(COL) + '  right')),
+    line(setupCell(1) + setupCell(3)),
+    line(setupCell(2) + setupCell(4)),
+    grow,
+  ];
+  if (ui.mode === 'first') {
+    out.push(line(`${sp('a', '›')} who throws first?  ${sp('d', '1-4')}  ${cursor}`), line(''), line('1-4 start the game   esc back', 'd'));
   } else {
-    prompt = `${sp('a', '›')} ${ui.flash ? esc(ui.flash) : `${filled}/4 players in slots`}  ${cursor}`;
-    help = '↑↓ move   n new   x remove   1-2 left   3-4 right   enter next';
+    out.push(line(`${sp('a', '›')} ${esc(ui.flash || 'type the name at each corner')}`), line(''), line('enter next   arrows move   esc clear', 'd'));
   }
-  out.push(line(prompt), line(''), line(help, 'd'));
   return out.join('');
 }
 
 function playerCell(s, st) {
   const n = nameOf(s);
-  if (st.finished[s]) return sp('d', `  ${n.padEnd(9)}done  ${ord(st.finished[s])}`.padEnd(COL));
+  if (st.finished[s]) return sp('d', `  ${s} ${n.padEnd(9)}done  ${ord(st.finished[s])}`.padEnd(COL));
   const p = st.p[s];
-  const txt = `${n.padEnd(9)}${(p.hit + '/' + p.thrown).padEnd(6)}${pct(p.hit, p.hit + p.miss)}`;
+  const txt = `${s} ${n.padEnd(9)}${(p.hit + '/' + p.thrown).padEnd(6)}${pct(p.hit, p.hit + p.miss)}`;
   const isCur = s === st.cur && !st.over;
   return sp(isCur ? 'a' : '', ((isCur ? '> ' : '  ') + txt).padEnd(COL));
 }
@@ -162,10 +164,12 @@ function renderLive() {
   ];
   if (ui.help) {
     [
-      'j  hit            f  miss           tab  didn\'t see',
+      'f  hit            j  miss           d  didn\'t see',
       'space  stop the defense timer',
       '1-4  player finished their drink',
-      '⌫  undo           `  next thrower   s  stats',
+      'tab  teammate throws instead      `  other side throws instead',
+      '⌫  undo           s  stats',
+      'n  new game',
       'esc  close',
     ].forEach((t) => out.push(line('  ' + esc(t))));
   } else {
@@ -174,6 +178,10 @@ function renderLive() {
     last.forEach((t) => out.push(line(t && sp('d', '  ' + t))));
   }
   out.push(line(''));
+  if (ui.confirm) {
+    out.push(line(''), line(`${sp('a', '›')} end this game and start a new one?  ${sp('d', 'n yes   esc no')}  ${cursor}`), line(''));
+    return out.join('');
+  }
   if (st.over) {
     out.push(line(''), line(sp('a', `${st.over} wins`)), line('enter rematch   esc new game   s stats   ⌫ undo', 'd'));
     return out.join('');
@@ -182,8 +190,9 @@ function renderLive() {
     const def = other(side(st.pending.p));
     out.push(line(`${esc(def)} defending  <span class="a" id="timer">${((Date.now() - st.pending.at) / 1000).toFixed(1)}s</span>   ${sp('d', 'space when they stop it')}`));
   } else out.push(line(''));
-  out.push(line(`${sp('a', nameOf(st.cur) + ' ›')} hit or miss?  ${sp('d', 'j / f')}  ${cursor}`));
-  out.push(line("tab didn't see   ⌫ undo   1-4 finished   s stats   ? keys", 'd'));
+  out.push(line(`${sp('a', nameOf(st.cur) + ' ›')} hit ${sp('d', '(f)')} or miss ${sp('d', '(j)')}?  ${cursor}`));
+  out.push(line("d didn't see   ⌫ undo   1-4 finished   tab teammate   ` other side", 'd'));
+  out.push(line('s stats   n new game   ? keys', 'd'));
   return out.join('');
 }
 
@@ -237,17 +246,6 @@ function tick() {
 // ---------- input ----------
 function onSetupKey(e) {
   const k = e.key;
-  if (ui.mode === 'name') {
-    if (k === 'Enter') {
-      const n = ui.draft.trim().toLowerCase();
-      if (n && !roster.includes(n)) { roster.push(n); ui.cursor = roster.length - 1; }
-      ui.mode = null; ui.draft = '';
-    } else if (k === 'Escape') { ui.mode = null; ui.draft = ''; }
-    else if (k === 'Backspace') ui.draft = ui.draft.slice(0, -1);
-    else if (k.length === 1 && ui.draft.length < 12 && k !== ' ') ui.draft += k;
-    else return false;
-    return true;
-  }
   if (ui.mode === 'first') {
     if (k === 'Escape') ui.mode = null;
     else if (SLOTS.includes(+k)) newGame(+k);
@@ -255,23 +253,18 @@ function onSetupKey(e) {
     return true;
   }
   ui.flash = '';
-  if (k === 'ArrowDown' || k === 'j') ui.cursor = Math.min(roster.length - 1, ui.cursor + 1);
-  else if (k === 'ArrowUp' || k === 'k') ui.cursor = Math.max(0, ui.cursor - 1);
-  else if (k === 'n') { ui.mode = 'name'; ui.draft = ''; }
-  else if (k === 'x' && roster.length) {
-    const n = roster[ui.cursor];
-    SLOTS.forEach((s) => { if (app.slots[s] === n) app.slots[s] = null; });
-    roster.splice(ui.cursor, 1);
-    ui.cursor = Math.max(0, Math.min(ui.cursor, roster.length - 1));
-  } else if (SLOTS.includes(+k) && roster.length) {
-    const n = roster[ui.cursor];
-    SLOTS.forEach((s) => { if (app.slots[s] === n) app.slots[s] = null; });
-    app.slots[+k] = n;
-    ui.cursor = Math.min(roster.length - 1, ui.cursor + 1);
-  } else if (k === 'Enter') {
+  const f = ui.field, n = app.slots[f] || '';
+  if (k === 'Enter') {
+    // all four named: go pick the starter; otherwise jump to the next empty corner
     if (SLOTS.every((s) => app.slots[s])) ui.mode = 'first';
-    else ui.flash = 'need a name in each of slots 1-4';
-  } else return false;
+    else ui.field = [1, 2, 3, 4].map((i) => ((f + i - 1) % 4) + 1).find((s) => !app.slots[s]);
+  } else if (k === 'Tab') ui.field = e.shiftKey ? ((f + 2) % 4) + 1 : (f % 4) + 1;
+  else if (k === 'ArrowLeft' || k === 'ArrowRight') ui.field = { 1: 3, 2: 4, 3: 1, 4: 2 }[f];
+  else if (k === 'ArrowUp' || k === 'ArrowDown') ui.field = mate(f);
+  else if (k === 'Escape') app.slots[f] = null;
+  else if (k === 'Backspace') app.slots[f] = n.slice(0, -1) || null;
+  else if (k.length === 1 && k !== ' ' && n.length < 12) app.slots[f] = n + k.toLowerCase();
+  else return false;
   return true;
 }
 
@@ -283,6 +276,13 @@ function onGameKey(e) {
     if (k === 's' || k === 'Escape') ui.view = 'live'; else return false;
     return true;
   }
+  // any key other than a second n cancels the confirm
+  if (ui.confirm) {
+    ui.confirm = false;
+    if (k === 'n') { app.game = null; ui.mode = null; ui.field = 1; }
+    return true;
+  }
+  if (k === 'n') { ui.confirm = true; ui.help = false; return true; }
   if (ui.help && k === 'Escape') { ui.help = false; return true; }
   if (k === '?') { ui.help = !ui.help; return true; }
   if (k === 's') { ui.view = 'stats'; ui.help = false; return true; }
@@ -291,18 +291,23 @@ function onGameKey(e) {
 
   if (st.over) {
     if (k === 'Enter') { app.game = null; ui.mode = 'first'; }
-    else if (k === 'Escape') { app.game = null; ui.mode = null; }
+    else if (k === 'Escape') { app.game = null; ui.mode = null; ui.field = 1; }
     else return false;
     return true;
   }
-  if (k === 'j') push({ t: 'throw', p: st.cur, r: 'hit' });
-  else if (k === 'f') push({ t: 'throw', p: st.cur, r: 'miss' });
-  else if (k === 'Tab') push({ t: 'throw', p: st.cur, r: 'unk' });
+  if (k === 'f') push({ t: 'throw', p: st.cur, r: 'hit' });
+  else if (k === 'j') push({ t: 'throw', p: st.cur, r: 'miss' });
+  else if (k === 'd') push({ t: 'throw', p: st.cur, r: 'unk' });
+  else if (k === 'Tab') { if (!st.finished[mate(st.cur)]) push({ t: 'swap', p: st.cur }); }
   else if (k === ' ' && st.pending) push({ t: 'stop', ms: Date.now() - st.pending.at });
   else if (SLOTS.includes(+k) && !st.finished[+k]) push({ t: 'fin', p: +k });
   else if (k === '`') {
-    const i = g.order.indexOf(st.cur);
-    for (let n = 1; n <= 4; n++) { const c = g.order[(i + n) % 4]; if (!st.finished[c]) { push({ t: 'set', p: c }); break; } }
+    // hand the throw to the other side's next player in the rotation
+    const i = st.order.indexOf(st.cur);
+    for (let n = 1; n <= 4; n++) {
+      const c = st.order[(i + n) % 4];
+      if (side(c) !== side(st.cur) && !st.finished[c]) { push({ t: 'set', p: c }); break; }
+    }
   } else return false;
   return true;
 }
