@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bangers terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+  :root { --bg: #0c0c0c; --fg: #d8d5cc; --dim: #7d7a72; --acc: #ffb000; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+  body {
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: clamp(14px, 1.75vw, 28px);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  #screen { min-height: 100%; padding: 4vh 4vw; display: flex; flex-direction: column; }
+  .l { white-space: pre; min-height: 1.55em; overflow: hidden; text-overflow: ellipsis; }
+  .row { display: flex; justify-content: space-between; }
+  .grow { flex: 1; }
+  .d { color: var(--dim); }
+  .a { color: var(--acc); }
+  .cur { display: inline-block; width: 0.6em; height: 1.1em; background: var(--acc); vertical-align: -0.2em; animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<script>
+'use strict';
+
+// ---------- storage ----------
+const store = {
+  get(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+// roster: names; app: slots + current game (survives a refresh)
+let roster = store.get('bt.roster', []);
+let app = store.get('bt.app', null) || { slots: { 1: null, 2: null, 3: null, 4: null }, game: null, gameNo: 0 };
+// ui: transient state, never saved
+const ui = { cursor: 0, mode: null, draft: '', view: 'live', help: false, flash: '' };
+
+const save = () => { store.set('bt.roster', roster); store.set('bt.app', app); };
+
+// ---------- game model ----------
+const SLOTS = [1, 2, 3, 4];
+const side = (s) => (s <= 2 ? 'left' : 'right');
+const other = (sd) => (sd === 'left' ? 'right' : 'left');
+const mate = (s) => ({ 1: 2, 2: 1, 3: 4, 4: 3 }[s]);
+const nameOf = (s) => app.slots[s] || '?';
+const ord = (n) => n + (['th', 'st', 'nd', 'rd'][n] || 'th');
+
+function newGame(starter) {
+  const opp = starter <= 2 ? [3, 4] : [1, 2];
+  app.gameNo += 1;
+  app.game = { no: app.gameNo, order: [starter, mate(starter), ...opp], events: [], startAt: Date.now() };
+  ui.view = 'live'; ui.help = false; ui.mode = null;
+}
+
+// Everything on screen is derived from the event list, so undo is just pop().
+function derive(g) {
+  const st = {
+    cur: g.order[0], finished: {}, place: 0, over: null, pending: null,
+    p: {}, log: [], hitsTaken: { left: 0, right: 0 }, stops: { left: [], right: [] },
+  };
+  SLOTS.forEach((s) => (st.p[s] = { thrown: 0, hit: 0, miss: 0, unk: 0 }));
+  const next = (from) => {
+    const i = g.order.indexOf(from);
+    for (let k = 1; k <= 4; k++) { const c = g.order[(i + k) % 4]; if (!st.finished[c]) return c; }
+    return from;
+  };
+  let lastHit = null;
+  for (const e of g.events) {
+    if (e.t === 'throw') {
+      const ps = st.p[e.p];
+      ps.thrown++; ps[e.r]++;
+      const word = { hit: 'hit', miss: 'miss', unk: "didn't see" }[e.r];
+      st.log.push(nameOf(e.p).padEnd(9) + word);
+      if (e.r === 'hit') { st.hitsTaken[other(side(e.p))]++; lastHit = e; } else lastHit = null;
+      st.cur = next(e.p);
+    } else if (e.t === 'stop' && lastHit) {
+      const def = other(side(lastHit.p));
+      st.stops[def].push(e.ms);
+      st.log[st.log.length - 1] += ` · ${def} stopped it in ${(e.ms / 1000).toFixed(1)}s`;
+      lastHit = null;
+    } else if (e.t === 'fin') {
+      st.finished[e.p] = ++st.place;
+      const txt = `${nameOf(e.p)} finished ${ord(st.place)}`;
+      if (st.log.length) st.log[st.log.length - 1] += ' · ' + txt; else st.log.push(txt);
+      if (st.cur === e.p) st.cur = next(e.p);
+      const sd = side(e.p);
+      if (!st.over && st.finished[mate(e.p)]) st.over = sd;
+    } else if (e.t === 'set') {
+      st.cur = e.p;
+    }
+  }
+  st.pending = st.over ? null : lastHit;
+  return st;
+}
+
+// ---------- rendering ----------
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const sp = (cls, s) => `<span class="${cls}">${esc(s)}</span>`;
+const line = (html, cls = '') => `<div class="l ${cls}">${html || ' '}</div>`;
+const header = (left, right = '') => `<div class="l row">${sp('d', left)}${sp('d', right)}</div>`;
+const grow = '<div class="grow"></div>';
+const pct = (h, n) => (n ? Math.round((100 * h) / n) + '%' : '—');
+const clock = (ms) => { const s = Math.floor(ms / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+const cursor = '<span class="cur"></span>';
+const COL = 38;
+
+function renderSetup() {
+  const out = [header('bangers terminal · new game'), line(''), line('players', 'd')];
+  if (!roster.length) out.push(line('  no players yet', 'd'));
+  roster.forEach((n, i) => {
+    const slot = SLOTS.find((s) => app.slots[s] === n);
+    const sel = i === ui.cursor && ui.mode !== 'first';
+    const left = (sel ? '> ' : '  ') + n.padEnd(10);
+    if (slot) out.push(line(sp(sel ? 'a' : '', left) + sp('', `${slot}   `) + sp('d', side(slot))));
+    else out.push(line(sp(sel ? 'a' : 'd', left)));
+  });
+  out.push(grow);
+  const filled = SLOTS.filter((s) => app.slots[s]).length;
+  let prompt, help;
+  if (ui.mode === 'name') {
+    prompt = `${sp('a', '›')} new name: ${esc(ui.draft)}${cursor}`;
+    help = 'enter add   esc cancel';
+  } else if (ui.mode === 'first') {
+    prompt = `${sp('a', '›')} who throws first?  ${sp('d', '1-4')}  ${cursor}`;
+    help = '1-4 start the game   esc back';
+  } else {
+    prompt = `${sp('a', '›')} ${ui.flash ? esc(ui.flash) : `${filled}/4 players in slots`}  ${cursor}`;
+    help = '↑↓ move   n new   x remove   1-2 left   3-4 right   enter next';
+  }
+  out.push(line(prompt), line(''), line(help, 'd'));
+  return out.join('');
+}
+
+function playerCell(s, st) {
+  const n = nameOf(s);
+  if (st.finished[s]) return sp('d', `  ${n.padEnd(9)}done  ${ord(st.finished[s])}`.padEnd(COL));
+  const p = st.p[s];
+  const txt = `${n.padEnd(9)}${(p.hit + '/' + p.thrown).padEnd(6)}${pct(p.hit, p.hit + p.miss)}`;
+  const isCur = s === st.cur && !st.over;
+  return sp(isCur ? 'a' : '', ((isCur ? '> ' : '  ') + txt).padEnd(COL));
+}
+
+function renderLive() {
+  const g = app.game, st = derive(g);
+  ui.timerAt = st.pending ? st.pending.at : null;
+  const out = [
+    `<div class="l row">${sp('d', `bangers terminal · game ${g.no}`)}<span class="d" id="clock">${clock(Date.now() - g.startAt)}</span></div>`,
+    line(''),
+    line(sp('d', '  left'.padEnd(COL) + '  right')),
+    line(playerCell(1, st) + playerCell(3, st)),
+    line(playerCell(2, st) + playerCell(4, st)),
+    grow,
+  ];
+  if (ui.help) {
+    [
+      'j  hit            f  miss           tab  didn\'t see',
+      'space  stop the defense timer',
+      '1-4  player finished their drink',
+      '⌫  undo           `  next thrower   s  stats',
+      'esc  close',
+    ].forEach((t) => out.push(line('  ' + esc(t))));
+  } else {
+    const last = st.log.slice(-3);
+    while (last.length < 3) last.unshift('');
+    last.forEach((t) => out.push(line(t && sp('d', '  ' + t))));
+  }
+  out.push(line(''));
+  if (st.over) {
+    out.push(line(''), line(sp('a', `${st.over} wins`)), line('enter rematch   esc new game   s stats   ⌫ undo', 'd'));
+    return out.join('');
+  }
+  if (st.pending) {
+    const def = other(side(st.pending.p));
+    out.push(line(`${esc(def)} defending  <span class="a" id="timer">${((Date.now() - st.pending.at) / 1000).toFixed(1)}s</span>   ${sp('d', 'space when they stop it')}`));
+  } else out.push(line(''));
+  out.push(line(`${sp('a', nameOf(st.cur) + ' ›')} hit or miss?  ${sp('d', 'j / f')}  ${cursor}`));
+  out.push(line("tab didn't see   ⌫ undo   1-4 finished   s stats   ? keys", 'd'));
+  return out.join('');
+}
+
+function renderStats() {
+  const g = app.game, st = derive(g);
+  const out = [header(`bangers terminal · game ${g.no} · stats`, st.over ? `${st.over} wins` : clock(Date.now() - g.startAt)), line('')];
+  out.push(line('             thrown   hit   hit %   finished', 'd'));
+  for (const sd of ['left', 'right']) {
+    out.push(line(sd, 'd'));
+    for (const s of SLOTS.filter((x) => side(x) === sd)) {
+      const p = st.p[s];
+      const fin = st.finished[s] ? ord(st.finished[s]) : '';
+      out.push(line(esc(`  ${nameOf(s).padEnd(14)}${String(p.thrown).padStart(3)}   ${String(p.hit).padStart(3)}   ${pct(p.hit, p.hit + p.miss).padStart(5)}   ${fin}`)));
+    }
+  }
+  out.push(line(''), line('defense      hits taken   avg time to stop them', 'd'));
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length / 1000 : null);
+  const avgs = { left: avg(st.stops.left), right: avg(st.stops.right) };
+  const best = avgs.left != null && avgs.right != null ? (avgs.left <= avgs.right ? 'left' : 'right') : null;
+  for (const sd of ['left', 'right']) {
+    const a = avgs[sd] == null ? '—' : avgs[sd].toFixed(1) + 's';
+    out.push(line(esc(`  ${sd.padEnd(16)}${String(st.hitsTaken[sd]).padStart(3)}    `) + sp(sd === best ? 'a' : '', a)));
+  }
+  out.push(line(''), line('hit %', 'd'));
+  const rows = SLOTS.map((s) => ({ n: nameOf(s), h: st.p[s].hit, k: st.p[s].hit + st.p[s].miss }))
+    .sort((a, b) => (b.k ? b.h / b.k : -1) - (a.k ? a.h / a.k : -1));
+  for (const r of rows) {
+    const f = r.k ? Math.round((24 * r.h) / r.k) : 0;
+    out.push(line(`  ${esc(r.n.padEnd(8))}${sp('a', '█'.repeat(f))}${sp('d', '░'.repeat(24 - f))}  ${pct(r.h, r.k)}`));
+  }
+  out.push(grow, line('s back', 'd'));
+  return out.join('');
+}
+
+const screen = document.getElementById('screen');
+function render() {
+  screen.innerHTML = !app.game ? renderSetup() : ui.view === 'stats' ? renderStats() : renderLive();
+}
+
+// Only the timer and clock text change between keypresses.
+function tick() {
+  if (app.game) {
+    const t = document.getElementById('timer');
+    if (t && ui.timerAt) t.textContent = ((Date.now() - ui.timerAt) / 1000).toFixed(1) + 's';
+    const c = document.getElementById('clock');
+    if (c) { const v = clock(Date.now() - app.game.startAt); if (c.textContent !== v) c.textContent = v; }
+  }
+  requestAnimationFrame(tick);
+}
+
+// ---------- input ----------
+function onSetupKey(e) {
+  const k = e.key;
+  if (ui.mode === 'name') {
+    if (k === 'Enter') {
+      const n = ui.draft.trim().toLowerCase();
+      if (n && !roster.includes(n)) { roster.push(n); ui.cursor = roster.length - 1; }
+      ui.mode = null; ui.draft = '';
+    } else if (k === 'Escape') { ui.mode = null; ui.draft = ''; }
+    else if (k === 'Backspace') ui.draft = ui.draft.slice(0, -1);
+    else if (k.length === 1 && ui.draft.length < 12 && k !== ' ') ui.draft += k;
+    else return false;
+    return true;
+  }
+  if (ui.mode === 'first') {
+    if (k === 'Escape') ui.mode = null;
+    else if (SLOTS.includes(+k)) newGame(+k);
+    else return false;
+    return true;
+  }
+  ui.flash = '';
+  if (k === 'ArrowDown' || k === 'j') ui.cursor = Math.min(roster.length - 1, ui.cursor + 1);
+  else if (k === 'ArrowUp' || k === 'k') ui.cursor = Math.max(0, ui.cursor - 1);
+  else if (k === 'n') { ui.mode = 'name'; ui.draft = ''; }
+  else if (k === 'x' && roster.length) {
+    const n = roster[ui.cursor];
+    SLOTS.forEach((s) => { if (app.slots[s] === n) app.slots[s] = null; });
+    roster.splice(ui.cursor, 1);
+    ui.cursor = Math.max(0, Math.min(ui.cursor, roster.length - 1));
+  } else if (SLOTS.includes(+k) && roster.length) {
+    const n = roster[ui.cursor];
+    SLOTS.forEach((s) => { if (app.slots[s] === n) app.slots[s] = null; });
+    app.slots[+k] = n;
+    ui.cursor = Math.min(roster.length - 1, ui.cursor + 1);
+  } else if (k === 'Enter') {
+    if (SLOTS.every((s) => app.slots[s])) ui.mode = 'first';
+    else ui.flash = 'need a name in each of slots 1-4';
+  } else return false;
+  return true;
+}
+
+function onGameKey(e) {
+  const k = e.key, g = app.game, st = derive(g);
+  const push = (ev) => g.events.push({ ...ev, at: Date.now() });
+
+  if (ui.view === 'stats') {
+    if (k === 's' || k === 'Escape') ui.view = 'live'; else return false;
+    return true;
+  }
+  if (ui.help && k === 'Escape') { ui.help = false; return true; }
+  if (k === '?') { ui.help = !ui.help; return true; }
+  if (k === 's') { ui.view = 'stats'; ui.help = false; return true; }
+  if (k === 'Backspace') { g.events.pop(); return true; }
+  if (k === 'Escape' && !g.events.length) { app.game = null; app.gameNo -= 1; ui.mode = 'first'; return true; }
+
+  if (st.over) {
+    if (k === 'Enter') { app.game = null; ui.mode = 'first'; }
+    else if (k === 'Escape') { app.game = null; ui.mode = null; }
+    else return false;
+    return true;
+  }
+  if (k === 'j') push({ t: 'throw', p: st.cur, r: 'hit' });
+  else if (k === 'f') push({ t: 'throw', p: st.cur, r: 'miss' });
+  else if (k === 'Tab') push({ t: 'throw', p: st.cur, r: 'unk' });
+  else if (k === ' ' && st.pending) push({ t: 'stop', ms: Date.now() - st.pending.at });
+  else if (SLOTS.includes(+k) && !st.finished[+k]) push({ t: 'fin', p: +k });
+  else if (k === '`') {
+    const i = g.order.indexOf(st.cur);
+    for (let n = 1; n <= 4; n++) { const c = g.order[(i + n) % 4]; if (!st.finished[c]) { push({ t: 'set', p: c }); break; } }
+  } else return false;
+  return true;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const handled = app.game ? onGameKey(e) : onSetupKey(e);
+  if (handled) { e.preventDefault(); save(); render(); }
+  else if (['Tab', ' ', 'Backspace'].includes(e.key)) e.preventDefault();
+});
+
+render();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
