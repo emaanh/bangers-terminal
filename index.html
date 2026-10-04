@@ -55,7 +55,7 @@ const nameOf = (s) => app.slots[s] || '?';
 // right hand says what happened, so nothing depends on whose turn it "should" be
 const KEY = { 1: 'a', 2: 's', 3: 'd', 4: 'f' };
 const WHO = { a: 1, s: 2, d: 3, f: 4 };
-const ACT = { j: 'hit', k: 'miss', l: 'unk', ';': 'fin' };
+const ACT = { j: 'hit', k: 'miss', ';': 'fin' };
 const ord = (n) => n + (['th', 'st', 'nd', 'rd'][n] || 'th');
 
 function newGame() {
@@ -115,7 +115,6 @@ const SOUND = {
   who: (s) => tone({ 1: 440, 2: 520, 3: 620, 4: 740 }[s], 50), // each corner has its own pitch
   hit: () => { tone(660); tone(990, 90, 'sine', 70); },
   miss: () => tone(300, 120),
-  unk: () => tone(450, 80),
   fin: () => { tone(520); tone(660, 70, 'sine', 80); tone(780, 120, 'sine', 160); },
   stop: () => tone(1200, 50),
   undo: () => { tone(500, 50); tone(350, 70, 'sine', 60); },
@@ -176,7 +175,7 @@ function renderLive() {
   if (ui.help) {
     [
       'a s  left side      d f  right side      (pick who first)',
-      'j  hit     k  miss     l  didn\'t see     ;  finished drink',
+      'j  hit     k  miss     ;  finished drink',
       'space  stop the defense timer     x  don\'t time this one',
       'u  undo            esc  cancel',
       'tab  stats         n  new game',
@@ -200,9 +199,9 @@ function renderLive() {
     const def = other(side(st.pending.p));
     out.push(line(`${esc(def)} defending  <span class="a" id="timer">${((Date.now() - st.pending.at) / 1000).toFixed(1)}s</span>   ${sp('d', "space stopped   x don't time")}`));
   } else out.push(line(''));
-  if (ui.who) out.push(line(`${sp('a', nameOf(ui.who) + ' ›')} hit ${sp('d', '(j)')}  miss ${sp('d', '(k)')}  didn't see ${sp('d', '(l)')}  finished ${sp('d', '(;)')}  ${cursor}`));
+  if (ui.who) out.push(line(`${sp('a', nameOf(ui.who) + ' ›')} hit ${sp('d', '(j)')}  miss ${sp('d', '(k)')}  finished ${sp('d', '(;)')}  ${cursor}`));
   else out.push(line(`${sp('a', '›')} who? ${sp('d', 'a s d f')}  ${cursor}`));
-  out.push(line("a s d f who   then   j hit   k miss   l didn't see   ; finished", 'd'), line('u undo   tab stats   n new game   ? keys', 'd'));
+  out.push(line("a s d f who   then   j hit   k miss   ; finished", 'd'), line('u undo   tab stats   n new game   ? keys', 'd'));
   return out.join('');
 }
 
