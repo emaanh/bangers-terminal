@@ -53,10 +53,10 @@ const side = (s) => (s <= 2 ? 'left' : 'right');
 const other = (sd) => (sd === 'left' ? 'right' : 'left');
 const mate = (s) => ({ 1: 2, 2: 1, 3: 4, 4: 3 }[s]);
 const nameOf = (s) => app.slots[s] || '?';
-// home row: left hand picks who threw (a s = left side, d f = right side),
+// home row: left hand picks who threw (s a = left side, d f = right side),
 // right hand says what happened, so nothing depends on whose turn it "should" be
-const KEY = { 1: 'a', 2: 's', 3: 'd', 4: 'f' };
-const WHO = { a: 1, s: 2, d: 3, f: 4 };
+const KEY = { 1: 's', 2: 'a', 3: 'd', 4: 'f' };
+const WHO = { s: 1, a: 2, d: 3, f: 4 };
 const ACT = { j: 'hit', k: 'miss', ';': 'fin' };
 const ord = (n) => n + (['th', 'st', 'nd', 'rd'][n] || 'th');
 
@@ -179,7 +179,7 @@ function renderLive() {
   ];
   if (ui.help) {
     [
-      'a s  left side     d f  right side',
+      's a  left side     d f  right side',
       'j  hit     k  miss     ;  finished',
       'space  stop timer     x  don\'t time it',
       'u  undo     n  new game     tab  stats',
