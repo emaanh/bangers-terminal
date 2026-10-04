@@ -18,6 +18,8 @@
     -webkit-font-smoothing: antialiased;
   }
   #screen { min-height: 100%; padding: 4vh 4vw; display: flex; flex-direction: column; }
+  /* the combined view is ~45 columns, so it can run bigger and still fit half a screen */
+  #screen.compact { font-size: clamp(14px, 3vw, 28px); }
   .l { white-space: pre; min-height: 1.55em; overflow: hidden; text-overflow: ellipsis; }
   .row { display: flex; justify-content: space-between; }
   .grow { flex: 1; }
@@ -161,48 +163,97 @@ function playerCell(s, st) {
   return sp(picked ? 'a' : '', ((picked ? '> ' : '  ') + txt).padEnd(COL));
 }
 
-function renderLive() {
+// one-column player row with an inline hit % bar, for the combined view
+function compactCell(s, st) {
+  const p = st.p[s], k = p.hit + p.miss, f = k ? Math.round((12 * p.hit) / k) : 0;
+  const picked = s === ui.who;
+  const txt = `${KEY[s]} ${nameOf(s).padEnd(9)}${(p.hit + '/' + p.thrown).padStart(5)} ${pct(p.hit, k).padStart(5)}  `;
+  return sp(picked ? 'a' : '', (picked ? '> ' : '  ') + txt) + sp('a', '█'.repeat(f)) + sp('d', '░'.repeat(12 - f))
+    + (st.finished[s] ? '  ' + ord(st.finished[s]) : '');
+}
+
+// withStats: the input view with the team and hit % tables under the players
+function renderLive(withStats) {
   const g = app.game, st = derive(g);
   ui.timerAt = st.pending ? st.pending.at : null;
-  const out = [
-    `<div class="l row">${sp('d', `bangers terminal · game ${g.no}`)}<span class="d" id="clock">${clock(Date.now() - g.startAt)}</span></div>`,
-    line(''),
-    line(sp('d', '  left'.padEnd(COL) + '  right')),
-    line(playerCell(1, st) + playerCell(3, st)),
-    line(playerCell(2, st) + playerCell(4, st)),
-    grow,
-  ];
+  const out = [`<div class="l row">${sp('d', `bangers terminal · game ${g.no}`)}<span class="d" id="clock">${clock(Date.now() - g.startAt)}</span></div>`, line('')];
+  if (withStats) {
+    // narrow enough for half a screen: each side's team numbers sit above its players
+    const t = teamStats(st);
+    for (const sd of ['left', 'right']) {
+      out.push(line(sp('d', `${sd.padEnd(7)}took ${st.hitsTaken[sd]}  stop `) + sp(sd === t.best ? 'a' : 'd', t.stop[sd]) + sp('d', `  drank ${t.drank[sd]}`)));
+      SLOTS.filter((x) => side(x) === sd).forEach((x) => out.push(line(compactCell(x, st))));
+    }
+  } else {
+    out.push(line(sp('d', '  left'.padEnd(COL) + '  right')), line(playerCell(1, st) + playerCell(3, st)), line(playerCell(2, st) + playerCell(4, st)));
+  }
+  out.push(grow);
   if (ui.help) {
     [
-      'a s  left side      d f  right side      (pick who first)',
-      'j  hit     k  miss     ;  finished drink',
-      'space  stop the defense timer     x  don\'t time this one',
-      'u  undo            esc  cancel',
-      'tab  stats         n  new game',
-      'esc  close',
+      'a s  left side     d f  right side',
+      'j  hit     k  miss     ;  finished',
+      'space  stop timer     x  don\'t time it',
+      'u  undo     n  new game     tab  view',
+      'esc  cancel / close',
     ].forEach((t) => out.push(line('  ' + esc(t))));
   } else {
-    const last = st.log.slice(-3);
-    while (last.length < 3) last.unshift('');
+    // the combined view keeps only the latest play
+    const n = withStats ? 1 : 3, last = st.log.slice(-n);
+    while (last.length < n) last.unshift('');
     last.forEach((t) => out.push(line(t && sp('d', '  ' + t))));
   }
   out.push(line(''));
   if (ui.confirm) {
-    out.push(line(''), line(`${sp('a', '›')} end this game and start a new one?  ${sp('d', 'n yes   esc no')}  ${cursor}`), line(''));
+    out.push(line(''), line(`${sp('a', '›')} end this game?  ${sp('d', 'n yes  esc no')}  ${cursor}`), line(''));
     return out.join('');
   }
   if (st.over) {
-    out.push(line(''), line(sp('a', `${st.over} wins`)), line('enter rematch   esc new game   tab stats   u undo', 'd'));
+    out.push(line(''), line(sp('a', `${st.over} wins`)), line('enter rematch  esc new game  u undo', 'd'));
     return out.join('');
   }
   if (st.pending) {
     const def = other(side(st.pending.p));
-    out.push(line(`${esc(def)} defending  <span class="a" id="timer">${((Date.now() - st.pending.at) / 1000).toFixed(1)}s</span>   ${sp('d', "space stopped   x don't time")}`));
+    out.push(line(`${esc(def)} defending  <span class="a" id="timer">${((Date.now() - st.pending.at) / 1000).toFixed(1)}s</span>   ${sp('d', "space stop  x skip")}`));
   } else out.push(line(''));
   if (ui.who) out.push(line(`${sp('a', nameOf(ui.who) + ' ›')} hit ${sp('d', '(j)')}  miss ${sp('d', '(k)')}  finished ${sp('d', '(;)')}  ${cursor}`));
   else out.push(line(`${sp('a', '›')} who? ${sp('d', 'a s d f')}  ${cursor}`));
-  out.push(line("a s d f who   then   j hit   k miss   ; finished", 'd'), line('u undo   tab stats   n new game   ? keys', 'd'));
+  if (withStats) out.push(line('j hit  k miss  ; done  u undo  ? keys', 'd'));
+  else out.push(line("a s d f who   then   j hit   k miss   ; finished", 'd'), line('u undo   tab view   n new game   ? keys', 'd'));
   return out.join('');
+}
+
+function teamStats(st) {
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length / 1000 : null);
+  const avgs = { left: avg(st.stops.left), right: avg(st.stops.right) };
+  const t = { stop: {}, drank: {}, best: null };
+  if (avgs.left != null && avgs.right != null) t.best = avgs.left <= avgs.right ? 'left' : 'right';
+  for (const sd of ['left', 'right']) {
+    t.stop[sd] = avgs[sd] == null ? '—' : avgs[sd].toFixed(1) + 's';
+    // a side drinks for the other side's avg stop time on every hit it lands
+    const o = other(sd);
+    t.drank[sd] = avgs[o] == null ? '—' : (avgs[o] * st.hitsTaken[o]).toFixed(1) + 's';
+  }
+  return t;
+}
+
+function teamLines(st) {
+  const t = teamStats(st), out = [line('teams        hits taken   avg stop time   time drinking', 'd')];
+  for (const sd of ['left', 'right']) {
+    out.push(line(esc(`  ${sd.padEnd(18)}${String(st.hitsTaken[sd]).padStart(3)}${' '.repeat(16 - t.stop[sd].length)}`)
+      + sp(sd === t.best ? 'a' : '', t.stop[sd]) + esc(t.drank[sd].padStart(16))));
+  }
+  return out;
+}
+
+function barLines(st) {
+  const out = [line('hit %', 'd')];
+  const rows = SLOTS.map((s) => ({ n: nameOf(s), h: st.p[s].hit, k: st.p[s].hit + st.p[s].miss }))
+    .sort((a, b) => (b.k ? b.h / b.k : -1) - (a.k ? a.h / a.k : -1));
+  for (const r of rows) {
+    const f = r.k ? Math.round((24 * r.h) / r.k) : 0;
+    out.push(line(`  ${esc(r.n.padEnd(8))}${sp('a', '█'.repeat(f))}${sp('d', '░'.repeat(24 - f))}  ${pct(r.h, r.k)}`));
+  }
+  return out;
 }
 
 function renderStats() {
@@ -217,32 +268,15 @@ function renderStats() {
       out.push(line(esc(`  ${nameOf(s).padEnd(14)}${String(p.thrown).padStart(3)}   ${String(p.hit).padStart(3)}   ${pct(p.hit, p.hit + p.miss).padStart(5)}   ${fin}`)));
     }
   }
-  out.push(line(''), line('teams        hits taken   avg stop time   time drinking', 'd'));
-  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length / 1000 : null);
-  const avgs = { left: avg(st.stops.left), right: avg(st.stops.right) };
-  const best = avgs.left != null && avgs.right != null ? (avgs.left <= avgs.right ? 'left' : 'right') : null;
-  for (const sd of ['left', 'right']) {
-    const a = avgs[sd] == null ? '—' : avgs[sd].toFixed(1) + 's';
-    // a side drinks for the other side's avg stop time on every hit it lands
-    const o = other(sd);
-    const drank = avgs[o] == null ? '—' : (avgs[o] * st.hitsTaken[o]).toFixed(1) + 's';
-    out.push(line(esc(`  ${sd.padEnd(18)}${String(st.hitsTaken[sd]).padStart(3)}${' '.repeat(16 - a.length)}`)
-      + sp(sd === best ? 'a' : '', a) + esc(drank.padStart(16))));
-  }
-  out.push(line(''), line('hit %', 'd'));
-  const rows = SLOTS.map((s) => ({ n: nameOf(s), h: st.p[s].hit, k: st.p[s].hit + st.p[s].miss }))
-    .sort((a, b) => (b.k ? b.h / b.k : -1) - (a.k ? a.h / a.k : -1));
-  for (const r of rows) {
-    const f = r.k ? Math.round((24 * r.h) / r.k) : 0;
-    out.push(line(`  ${esc(r.n.padEnd(8))}${sp('a', '█'.repeat(f))}${sp('d', '░'.repeat(24 - f))}  ${pct(r.h, r.k)}`));
-  }
-  out.push(grow, line('tab back', 'd'));
+  out.push(line(''), ...teamLines(st), line(''), ...barLines(st));
+  out.push(grow, line('tab live', 'd'));
   return out.join('');
 }
 
 const screen = document.getElementById('screen');
 function render() {
-  screen.innerHTML = !app.game ? renderSetup() : ui.view === 'stats' ? renderStats() : renderLive();
+  screen.classList.toggle('compact', !!app.game && ui.view === 'both');
+  screen.innerHTML = !app.game ? renderSetup() : ui.view === 'stats' ? renderStats() : renderLive(ui.view === 'both');
 }
 
 // Only the timer and clock text change between keypresses.
@@ -299,7 +333,8 @@ function onGameKey(e) {
   }
   if (k === 'n') { ui.confirm = true; ui.help = false; ui.who = null; return true; }
   if (k === '?') { ui.help = !ui.help; return true; }
-  if (k === 'Tab') { ui.view = 'stats'; ui.help = false; ui.who = null; return true; }
+  // tab cycles live -> live + stats -> stats only -> live
+  if (k === 'Tab') { ui.view = ui.view === 'live' ? 'both' : 'stats'; ui.help = false; if (ui.view === 'stats') ui.who = null; return true; }
   if (k === 'u' || k === 'Backspace') {
     // half-typed command: drop it; otherwise take back the last thing recorded
     if (ui.who) ui.who = null;
