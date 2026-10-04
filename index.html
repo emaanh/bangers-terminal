@@ -68,11 +68,14 @@ function newGame() {
 // Everything on screen is derived from the event list, so undo is just pop().
 function derive(g) {
   const st = {
-    finished: {}, place: 0, over: null, pending: null,
+    finished: {}, place: 0, over: null, pending: null, next: null,
     p: {}, log: [], hitsTaken: { left: 0, right: 0 }, stops: { left: [], right: [] },
   };
   SLOTS.forEach((s) => (st.p[s] = { thrown: 0, hit: 0, miss: 0, unk: 0 }));
   let lastHit = null;
+  // sides throw in pairs: after one teammate throws, assume the other is next;
+  // after the pair, nobody is assumed since either player can start the other side
+  let pairFirst = null;
   for (const e of g.events) {
     if (e.t === 'throw') {
       const ps = st.p[e.p];
@@ -80,6 +83,8 @@ function derive(g) {
       const word = { hit: 'hit', miss: 'miss', unk: "didn't see" }[e.r];
       st.log.push(nameOf(e.p).padEnd(9) + word);
       if (e.r === 'hit') { st.hitsTaken[other(side(e.p))]++; lastHit = e; } else lastHit = null;
+      if (pairFirst && e.p === mate(pairFirst)) pairFirst = st.next = null;
+      else { pairFirst = e.p; st.next = mate(e.p); }
     } else if (e.t === 'stop' && lastHit) {
       const def = other(side(lastHit.p));
       if (e.skip) st.log[st.log.length - 1] += ' · not timed';
@@ -158,7 +163,7 @@ function playerCell(s, st) {
   const p = st.p[s];
   const done = st.finished[s] ? '   done ' + ord(st.finished[s]) : '';
   const txt = `${KEY[s]} ${n.padEnd(9)}${(p.hit + '/' + p.thrown).padEnd(6)}${pct(p.hit, p.hit + p.miss).padEnd(4)}${done}`;
-  const picked = s === ui.who;
+  const picked = s === (ui.who || st.next);
   return sp(picked ? 'a' : '', ((picked ? '> ' : '  ') + txt).padEnd(COL));
 }
 
@@ -201,6 +206,7 @@ function inputLines(st) {
     out.push(line(`${esc(def)} defending  <span class="a" id="timer">${((Date.now() - st.pending.at) / 1000).toFixed(1)}s</span>   ${sp('d', "space stop  x skip")}`));
   } else out.push(line(''));
   if (ui.who) out.push(line(`${sp('a', nameOf(ui.who) + ' ›')} hit ${sp('d', '(j)')}  miss ${sp('d', '(k)')}  finished ${sp('d', '(;)')}  ${cursor}`));
+  else if (st.next) out.push(line(`${sp('a', nameOf(st.next) + ' ›')} hit ${sp('d', '(j)')}  miss ${sp('d', '(k)')}  ${sp('d', 'or a s d f')}  ${cursor}`));
   else out.push(line(`${sp('a', '›')} who? ${sp('d', 'a s d f')}  ${cursor}`));
   return out;
 }
@@ -248,7 +254,7 @@ function renderStats() {
     for (const s of SLOTS.filter((x) => side(x) === sd)) {
       const p = st.p[s];
       const fin = st.finished[s] ? ord(st.finished[s]) : '';
-      const picked = s === ui.who;
+      const picked = s === (ui.who || st.next);
       out.push(line(sp(picked ? 'a' : '', `${picked ? '> ' : '  '}${KEY[s]} ${nameOf(s).padEnd(12)}${String(p.thrown).padStart(3)}   ${String(p.hit).padStart(3)}   ${pct(p.hit, p.hit + p.miss).padStart(5)}   ${fin}`)));
     }
   }
@@ -337,8 +343,10 @@ function onGameKey(e) {
   }
   // a throw while the timer runs just leaves that hit untimed
   const act = ACT[k];
-  if (!act || !ui.who || (act === 'fin' && st.finished[ui.who])) return false;
-  push(act === 'fin' ? { t: 'fin', p: ui.who } : { t: 'throw', p: ui.who, r: act });
+  // throws fall back to the assumed teammate; finishing always needs a player key
+  const who = ui.who || (act !== 'fin' && st.next);
+  if (!act || !who || (act === 'fin' && st.finished[who])) return false;
+  push(act === 'fin' ? { t: 'fin', p: who } : { t: 'throw', p: who, r: act });
   ui.who = null;
   SOUND[act]();
   return true;
