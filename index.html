@@ -41,7 +41,7 @@ const store = {
 };
 
 // app: corner names + current game (survives a refresh)
-let app = store.get('bt.app', null) || { slots: { 1: null, 2: null, 3: null, 4: null }, game: null, gameNo: 0 };
+let app = store.get('bt.app', null) || { slots: { 1: null, 2: null, 3: null, 4: null }, game: null };
 // ui: transient state, never saved
 const ui = { field: 1, who: null, view: 'live', help: false, confirm: false, flash: '' };
 
@@ -61,8 +61,7 @@ const ACT = { j: 'hit', k: 'miss', ';': 'fin' };
 const ord = (n) => n + (['th', 'st', 'nd', 'rd'][n] || 'th');
 
 function newGame() {
-  app.gameNo += 1;
-  app.game = { no: app.gameNo, events: [], startAt: Date.now() };
+  app.game = { events: [], startAt: Date.now() };
   ui.view = 'live'; ui.help = false; ui.who = null;
 }
 
@@ -166,7 +165,7 @@ function playerCell(s, st) {
 function renderLive() {
   const g = app.game, st = derive(g);
   const out = [
-    `<div class="l row">${sp('d', `bangers terminal · game ${g.no}`)}<span class="d" id="clock">${clock(Date.now() - g.startAt)}</span></div>`,
+    `<div class="l row">${sp('d', 'bangers terminal')}<span class="d" id="clock">${clock(Date.now() - g.startAt)}</span></div>`,
     line(''),
     line(sp('d', '  left'.padEnd(COL) + '  right')),
     line(playerCell(1, st) + playerCell(3, st)),
@@ -242,7 +241,7 @@ function barLines(st) {
 
 function renderStats() {
   const g = app.game, st = derive(g);
-  const out = [`<div class="l row">${sp('d', `bangers terminal · game ${g.no} · stats`)}<span class="d" id="clock">${clock(Date.now() - g.startAt)}</span></div>`, line('')];
+  const out = [`<div class="l row">${sp('d', 'bangers terminal · stats')}<span class="d" id="clock">${clock(Date.now() - g.startAt)}</span></div>`, line('')];
   out.push(line('               thrown   hit   hit %   finished', 'd'));
   for (const sd of ['left', 'right']) {
     out.push(line(sd, 'd'));
@@ -310,7 +309,7 @@ function onGameKey(e) {
     else if (ui.help) ui.help = false;
     else if (st.over) { app.game = null; ui.field = 1; }
     else if (ui.view === 'stats') ui.view = 'live';
-    else if (!g.events.length) { app.game = null; app.gameNo -= 1; }
+    else if (!g.events.length) app.game = null;
     else return false;
     return true;
   }
